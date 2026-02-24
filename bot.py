@@ -223,8 +223,8 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     CURRENT[chat_id] = cred
     pass_str = cred.get("pass") or ""
-    text = f"<code>{cred['mail']}</code>\n<code>{pass_str}</code>" if pass_str else f"<code>{cred['mail']}</code>"
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=KEYBOARD_CHECK_DONE)
+    text = f"{cred['mail']}\n{pass_str}" if pass_str else cred["mail"]
+    await update.message.reply_text(text, reply_markup=KEYBOARD_CHECK_DONE)
     await _try_delete_user_message(update)
 
 
@@ -263,40 +263,57 @@ async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle [Check] and [Done] buttons. Check = fetch OTP and send with [Done]. Done = delete OTP message(s)."""
     q = update.callback_query
-    await q.answer()
     if not q.message or not q.from_user or not q.message.chat:
+        await q.answer()
         return
     chat_id = q.message.chat.id
     user_id = q.from_user.id
     if q.message.chat.type == "private":
         if user_id not in ADMIN_IDS:
+            await q.answer("Not allowed.", show_alert=True)
             return
     else:
         if chat_id not in ALLOWED_GROUP_IDS:
+            await q.answer()
             return
         if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
+            await q.answer("Not allowed.", show_alert=True)
             return
 
     if q.data == "check_otp":
         cred = CURRENT.get(chat_id)
         if not cred:
-            await context.bot.send_message(chat_id, "No mail assigned. Use /next first.")
+            await q.answer("No mail assigned. Use /next first.", show_alert=True)
             return
-        await _send_otp_message(context, chat_id, cred)
+        await q.answer("Checking inbox…")
+        mid = await _send_otp_message(context, chat_id, cred)
+        if mid is None:
+            await context.bot.send_message(chat_id, "Error fetching OTP. Check token / connection.")
         return
     if q.data == "done_otp":
+        await q.answer()
         msg_ids = LAST_OTP_MESSAGE_IDS.pop(chat_id, [])
+        failed = False
         for msg_id in msg_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
+                failed = True
+        if failed:
+            try:
+                await context.bot.send_message(chat_id, "Could not delete some messages (bot needs delete permission).")
+            except Exception:
                 pass
         return
     if q.data == "done_otp_self":
+        await q.answer()
         try:
             await q.message.delete()
         except Exception:
-            pass
+            try:
+                await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).")
+            except Exception:
+                pass
         if chat_id in LAST_OTP_MESSAGE_IDS and q.message and q.message.message_id in LAST_OTP_MESSAGE_IDS[chat_id]:
             LAST_OTP_MESSAGE_IDS[chat_id] = [i for i in LAST_OTP_MESSAGE_IDS[chat_id] if i != q.message.message_id]
         return

@@ -188,10 +188,23 @@ KEYBOARD_CHECK_DONE = InlineKeyboardMarkup([
 KEYBOARD_DONE = InlineKeyboardMarkup([[InlineKeyboardButton("Done", callback_data="done_otp_self")]])
 
 
-async def _send_otp_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, cred: dict) -> int | None:
-    """Fetch OTP for cred, send one message with code(s) and [Done] button. Appends message_id to LAST_OTP_MESSAGE_IDS. Returns message_id or None."""
+def _thread_kw(message_thread_id: int | None) -> dict:
+    """Kwargs for send_message so replies go to the same topic/thread in supergroups."""
+    if message_thread_id is None:
+        return {}
+    return {"message_thread_id": message_thread_id}
+
+
+async def _send_otp_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    cred: dict,
+    message_thread_id: int | None = None,
+) -> int | None:
+    """Fetch OTP for cred, send one message with code(s) and [Done] button in the same thread. Appends message_id to LAST_OTP_MESSAGE_IDS. Returns message_id or None."""
     if chat_id not in LAST_OTP_MESSAGE_IDS:
         LAST_OTP_MESSAGE_IDS[chat_id] = []
+    kw = _thread_kw(message_thread_id)
     try:
         token_data = get_access_token(
             client_id=cred["client_id"],
@@ -203,12 +216,12 @@ async def _send_otp_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, cr
             return None
         otp_entries = get_otp_from_inbox(access_token, max_messages=15)
         if not otp_entries:
-            msg = await context.bot.send_message(chat_id, "No OTP", reply_markup=KEYBOARD_DONE)
+            msg = await context.bot.send_message(chat_id, "No OTP", reply_markup=KEYBOARD_DONE, **kw)
             LAST_OTP_MESSAGE_IDS[chat_id].append(msg.message_id)
             return msg.message_id
         codes_only = [", ".join(e["otp_codes"]) for e in otp_entries]
         text = "<code>" + "  |  ".join(codes_only) + "</code>"
-        msg = await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=KEYBOARD_DONE)
+        msg = await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=KEYBOARD_DONE, **kw)
         LAST_OTP_MESSAGE_IDS[chat_id].append(msg.message_id)
         return msg.message_id
     except Exception:
@@ -252,15 +265,16 @@ async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "No mail assigned. Use /next to get one from stock, or /check email@hotmail.com to check a mail in stock."
         )
         return
+    thread_id = getattr(update.message, "message_thread_id", None)
     checking_msg = await update.message.reply_text("Checking inbox…")
     await _try_delete_user_message(update)
-    mid = await _send_otp_message(context, chat_id, cred)
+    mid = await _send_otp_message(context, chat_id, cred, message_thread_id=thread_id)
     try:
         await checking_msg.delete()
     except Exception:
         pass
     if mid is None:
-        await context.bot.send_message(chat_id, "Error")
+        await context.bot.send_message(chat_id, "Error", **_thread_kw(thread_id))
 
 
 async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,10 +302,11 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not cred:
             await q.answer("No mail assigned. Use /next first.", show_alert=True)
             return
+        thread_id = getattr(q.message, "message_thread_id", None)
         await q.answer("Checking inbox…")
-        mid = await _send_otp_message(context, chat_id, cred)
+        mid = await _send_otp_message(context, chat_id, cred, message_thread_id=thread_id)
         if mid is None:
-            await context.bot.send_message(chat_id, "Error fetching OTP. Check token / connection.")
+            await context.bot.send_message(chat_id, "Error fetching OTP. Check token / connection.", **_thread_kw(thread_id))
         return
     if q.data == "done_otp":
         await q.answer()
@@ -315,7 +330,8 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await q.message.edit_text("—", reply_markup=InlineKeyboardMarkup([]))
             except Exception:
                 try:
-                    await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).")
+                    thread_id = getattr(q.message, "message_thread_id", None)
+                    await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).", **_thread_kw(thread_id))
                 except Exception:
                     pass
         if chat_id in LAST_OTP_MESSAGE_IDS and q.message and q.message.message_id in LAST_OTP_MESSAGE_IDS[chat_id]:

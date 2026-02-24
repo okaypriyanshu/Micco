@@ -136,11 +136,36 @@ def get_by_email(email: str) -> dict | None:
     return None
 
 
+# When pasting in Telegram, newlines can become spaces. Split merged lines by " space before email|..."
+_SPLIT_MERGED = re.compile(r" (?=[^|]+@[^|]+\|[^|]*\|)")
+
+
+def _normalize_cred_lines(cred_lines: list[str]) -> list[str]:
+    """Split by newline, then split any long line that looks like multiple credentials (space before email|...)."""
+    out = []
+    for line in cred_lines:
+        line = (line or "").strip()
+        if not line or line.startswith("#"):
+            continue
+        # If line has many pipes and contains @, it might be "cred1 cred2 cred3" merged
+        if line.count("|") >= 4 and "@" in line:
+            parts = _SPLIT_MERGED.split(line)
+            for p in parts:
+                p = p.strip()
+                if p:
+                    out.append(p)
+        else:
+            out.append(line)
+    return out
+
+
 def add_to_fresh(cred_lines: list[str]) -> tuple[int, list[str]]:
     """
     Add credential lines to fresh_stock. Skips invalid/duplicate.
+    Handles pasted text where newlines were turned into spaces (splits on space before email|...).
     Returns (added_count, list of parse errors or duplicate emails).
     """
+    cred_lines = _normalize_cred_lines(cred_lines)
     _ensure_data_dir()
     existing_emails = {c.get("mail", "").strip().lower() for c in load_fresh()}
     existing_emails.update(c.get("mail", "").strip().lower() for c in load_used())

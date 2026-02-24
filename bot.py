@@ -607,7 +607,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    await update.message.reply_text("Use /next to get a mail from stock, or /check to get OTP for your current mail.")
+    # In groups, don't reply to random messages (avoids spam). In DM, show hint.
+    if update.message.chat.type == "private":
+        await update.message.reply_text("Use /next to get a mail from stock, or /check to get OTP for your current mail.")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

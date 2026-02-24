@@ -25,13 +25,27 @@ def get_access_token(client_id: str, refresh_token: str, client_secret: str | No
 
 
 def list_inbox_messages(access_token: str, top: int = 20) -> list[dict]:
-    """Fetch recent inbox messages (subject, bodyPreview, receivedDateTime, from)."""
+    """Fetch recent inbox messages (id, subject, bodyPreview, receivedDateTime, from)."""
     url = f"{GRAPH_BASE}/me/mailFolders/inbox/messages"
-    params = {"$top": top, "$orderby": "receivedDateTime desc", "$select": "subject,body,bodyPreview,receivedDateTime,from,isRead"}
+    params = {"$top": top, "$orderby": "receivedDateTime desc", "$select": "id,subject,body,bodyPreview,receivedDateTime,from,isRead"}
     headers = {"Authorization": f"Bearer {access_token}"}
     r = requests.get(url, headers=headers, params=params)
     r.raise_for_status()
     return r.json().get("value", [])
+
+
+def get_message(access_token: str, message_id: str) -> dict | None:
+    """Fetch a single message by id (full body). Returns None if not found."""
+    if not message_id:
+        return None
+    url = f"{GRAPH_BASE}/me/messages/{message_id}"
+    params = {"$select": "id,subject,body,bodyPreview,receivedDateTime,from,isRead"}
+    headers = {"Authorization": f"Bearer {access_token}"}
+    r = requests.get(url, headers=headers, params=params)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json()
 
 
 # Only treat as OTP email if subject/body clearly indicate verification (not marketing).

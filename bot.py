@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
 
-from graph_client import get_access_token, get_otp_from_inbox, list_inbox_messages
+from graph_client import get_access_token, get_otp_from_inbox, list_inbox_messages, get_message
 from storage import (
     get_next,
     add_to_fresh,
@@ -60,6 +60,8 @@ DELETE_AFTER_SECONDS = int(os.getenv("DELETE_AFTER_SECONDS", "90").strip() or "0
 CURRENT: dict[int, dict] = {}
 # Per-chat OTP message ids (so "Done" can delete all OTP messages)
 LAST_OTP_MESSAGE_IDS: dict[int, list[int]] = {}
+# Inbox list message -> email, cred, message_ids (for "open full mail" buttons)
+INBOX_CACHE: dict[tuple[int, int], dict] = {}
 
 # Messages for unauthorised access
 MSG_DM_NOT_ALLOWED = (
@@ -324,8 +326,12 @@ async def pass_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"Password for <b>{email}</b>:\n<code>{pass_str}</code>" if pass_str else f"No password stored for <b>{email}</b>.", parse_mode="HTML")
 
 
+def _esc(s: str, max_len: int = 80) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:max_len]
+
+
 async def inbox_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show last 10 inbox messages for an email that's in stock. Usage: /inbox email@hotmail.com"""
+    """Show last 10 inbox messages as short previews with buttons to open full mail."""
     if not await _check_access(update):
         return
     email = _parse_email_arg((update.message and update.message.text) or "")
@@ -353,21 +359,28 @@ async def inbox_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not messages:
         await update.message.reply_text(f"Inbox for <b>{email}</b> is empty.", parse_mode="HTML")
         return
-    def _esc(s: str) -> str:
-        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:80]
 
-    lines = [f"📧 <b>Inbox for {email}</b> (last 10):"]
-    for i, msg in enumerate(messages, 1):
-        subj = _esc(msg.get("subject") or "(no subject)")
+    lines = [f"📧 <b>Inbox for {email}</b> — tap a button to open full mail:"]
+    buttons = []
+    for i, msg in enumerate(messages):
+        subj = _esc(msg.get("subject") or "(no subject)", 45)
         from_info = msg.get("from", {}).get("emailAddress", {})
-        from_addr = _esc(from_info.get("address") or from_info.get("name") or "?")
-        received = (msg.get("receivedDateTime") or "")[:19]
-        preview = _esc((msg.get("bodyPreview") or "").strip().replace("\n", " "))
-        lines.append(f"{i}. <b>{subj}</b>\n   From: {from_addr} | {received}\n   {preview}")
-    text = "\n\n".join(lines)
+        from_addr = _esc(from_info.get("address") or from_info.get("name") or "?", 35)
+        received = (msg.get("receivedDateTime") or "")[:16]
+        preview = _esc((msg.get("bodyPreview") or "").strip().replace("\n", " "), 50)
+        lines.append(f"{i + 1}. <b>{subj}</b> · {from_addr} · {received}\n   {preview}")
+        buttons.append(InlineKeyboardButton(f"{i + 1}. {subj}", callback_data=f"inbox_{i}"))
+    text = "\n".join(lines)
     if len(text) > 4000:
         text = text[:3970] + "\n\n… (truncated)"
-    await update.message.reply_text(text, parse_mode="HTML")
+    keyboard = InlineKeyboardMarkup([buttons[:5], buttons[5:]])
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+    key = (sent.chat_id, sent.message_id)
+    INBOX_CACHE[key] = {
+        "email": email,
+        "cred": cred,
+        "message_ids": [m.get("id") for m in messages if m.get("id")],
+    }
 
 
 async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -389,6 +402,57 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
             await q.answer("Not allowed.", show_alert=True)
             return
+
+    # Inbox: open full mail (callback_data = inbox_0 .. inbox_9)
+    if q.data and q.data.startswith("inbox_"):
+        try:
+            idx = int(q.data.split("_")[1])
+        except (IndexError, ValueError):
+            await q.answer("Invalid button.", show_alert=True)
+            return
+        key = (chat_id, q.message.message_id)
+        entry = INBOX_CACHE.get(key)
+        if not entry or idx < 0 or idx >= len(entry.get("message_ids") or []):
+            await q.answer("Expired or invalid. Use /inbox again.", show_alert=True)
+            return
+        msg_id = entry["message_ids"][idx]
+        cred = entry["cred"]
+        await q.answer("Loading…")
+        try:
+            token_data = get_access_token(
+                client_id=cred["client_id"],
+                refresh_token=cred["refresh_token"],
+                client_secret=cred.get("client_secret"),
+            )
+            access_token = token_data.get("access_token")
+            full = get_message(access_token, msg_id) if access_token else None
+        except Exception:
+            full = None
+        if not full:
+            await context.bot.send_message(chat_id, "Could not load this message. Token may have expired.")
+            return
+        subj = _esc((full.get("subject") or "(no subject)"), 200)
+        from_info = full.get("from", {}).get("emailAddress", {})
+        from_addr = _esc(from_info.get("address") or from_info.get("name") or "?", 120)
+        received = (full.get("receivedDateTime") or "")[:19]
+        body = full.get("body", {})
+        content = (body.get("content") or "") if isinstance(body, dict) else ""
+        if isinstance(content, str) and content.strip():
+            content_plain = re.sub(r"<[^>]+>", " ", content).strip()
+            content_plain = content_plain.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        else:
+            content_plain = _esc((full.get("bodyPreview") or "").strip(), 3500)
+        full_text = (
+            f"📬 <b>{subj}</b>\n"
+            f"From: {from_addr}\n"
+            f"Date: {received}\n\n"
+            f"{content_plain}"
+        )
+        if len(full_text) > 4000:
+            full_text = full_text[:3970] + "\n\n… (truncated)"
+        thread_id = getattr(q.message, "message_thread_id", None)
+        await context.bot.send_message(chat_id, full_text, parse_mode="HTML", **_thread_kw(thread_id))
+        return
 
     if q.data == "check_otp":
         cred = CURRENT.get(chat_id)

@@ -1,13 +1,13 @@
-# Outlook OTP Telegram Bot
+# Outlook OTP Telegram Bot (Micco)
 
-A Telegram bot that signs in to your Outlook account using OAuth (Microsoft Graph) and checks your inbox for OTP/verification emails, then reports the codes back to you.
+Manages a **stock of Hotmail credentials** (fresh vs used) and checks inbox for OTP via OAuth and Microsoft Graph. Flow is similar to [FrostyBot](https://github.com/okaypriyanshu/FrostyBot): admins feed a list of credentials; users get the **next** one and use **/check** to receive OTP.
 
 ## How it works
 
-1. You send the bot a single line with your data: **mail|pass|refresh_token|client_id** (and optionally **|client_secret**).
-2. The bot stores these for your chat and uses the **refresh_token** + **client_id** to get an access token from Microsoft.
-3. You run **/check** and the bot reads your Outlook inbox via Microsoft Graph, finds messages that look like OTP/verification codes, and sends you the codes.
-4. You can send a **new** credential line anytime to switch to another account; the next **/check** will use that account.
+1. **Admin** adds credentials in bulk (e.g. ~100 lines) via **/upload**: paste lines or send a `.txt` file. Each line: `mail|pass|refresh_token|client_id` (optional 5th: `client_secret`). These go into **fresh stock** (`data/fresh_stock.txt`).
+2. **User** runs **/next**: the bot assigns one credential from fresh stock to that chat and moves it to **used** (`data/used.txt`).
+3. **User** runs **/check**: the bot uses the **current** assigned mail for that chat, calls Microsoft Graph, and replies with any OTP found in the inbox.
+4. **Check by email**: user can send **/check email@hotmail.com** to check that specific mail if it exists in stock (fresh or used). Or send a single message that is just an email address (e.g. `user@hotmail.com`); if that mail is in stock, the bot sets it as current and says to use **/check**.
 
 ## Setup
 
@@ -39,23 +39,41 @@ python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env and set TELEGRAM_BOT_TOKEN=your_bot_token
+# Edit .env: TELEGRAM_BOT_TOKEN and optionally ADMIN_IDS=123456789,987654321
 python bot.py
 ```
 
 ## Usage
 
-- **/start** – Instructions and credential format.
-- Send one line: **mail|pass|refresh_token|client_id** or **mail|pass|refresh_token|client_id|client_secret**  
-  The bot saves it for your chat and confirms.
-- **/check** – Fetches the last 15 inbox messages, finds likely OTP codes, and replies with “OTP received” and the codes.
-- Send another **mail|pass|refresh_token|client_id** line to switch account; then **/check** uses that account.
+- **/start** – Short help.
+- **/next** – Get the next unused mail from stock (assigned to your chat; then use **/check** for OTP).
+- **/check** – Get OTP for your current mail. Or **/check email@hotmail.com** to check that mail if it’s in stock.
+- **/stock** – Show fresh vs used count (admin only if `ADMIN_IDS` is set).
+- **/upload** – Admin only: add credentials in bulk (paste lines or send a `.txt` file).
+
+**Auto-detect by email:** Send a message that is only an email address (e.g. `user@hotmail.com`). If that mail is in fresh or used stock, the bot sets it as your current mail and tells you to use **/check**.
+
+## Data files (file-based storage)
+
+- **`data/fresh_stock.txt`** – One credential per line (unused). Populated by **/upload**.
+- **`data/used.txt`** – One credential per line (already assigned via **/next**). Used mails stay here so you can still **/check email@...** later.
+- The **`data/`** directory is in `.gitignore`; credentials are not committed.
+
+## Access control (limited people, group only, DM = admin only)
+
+Configure in `.env`:
+
+- **ADMIN_IDS** – Comma-separated user IDs. Only these users can use the bot **in DM** and run **/upload** and **/stock**.
+- **ALLOWED_GROUP_IDS** – Comma-separated group/supergroup chat IDs. The bot **only responds in these groups** (and in DMs for admins). In other groups it ignores messages. Get group ID: add [@RawDataBot](https://t.me/RawDataBot) to the group and read `chat.id` (e.g. `-1001234567890`).
+- **ALLOWED_USER_IDS** – Comma-separated user IDs who can use the bot **in the allowed groups**. If empty, everyone in those groups can use it.
+
+**Summary:** DM = admin only. Groups = only allowed group IDs, and (if set) only allowed user IDs.
 
 ## Security
 
-- Credentials are kept **in memory** only (per chat). Restarting the bot clears them.
-- Do not share your refresh token or client secret; anyone with them can read your mail.
-- Prefer running the bot in a private chat and on a machine you control.
+- Credentials are stored in **files** under `data/` and in **memory** per chat for “current” assignment.
+- **Access control:** Set **ADMIN_IDS** (DM + /upload, /stock), **ALLOWED_GROUP_IDS** (only these groups), and **ALLOWED_USER_IDS** (who can use in groups). DM = admin only; groups = allowed groups + (if set) allowed users.
+- Do not share refresh tokens or client secrets; anyone with them can read mail.
 
 ## Do I need to generate client_id myself?
 

@@ -3,11 +3,14 @@ Telegram bot: fresh/used Hotmail credential stock, /next to get one, /check to g
 Uses file-based storage (data/fresh_stock.txt, data/used.txt) like FrostyBot-style flow.
 """
 import asyncio
+import logging
 import os
 import re
+import time
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.error import Conflict
 
 from graph_client import get_access_token, get_otp_from_inbox
 from storage import (
@@ -422,11 +425,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
+async def _post_init(app: Application) -> None:
+    """Remove webhook so polling is the only consumer; avoids Conflict with another server."""
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env")
-    app = Application.builder().token(token).build()
+    logger = logging.getLogger(__name__)
+    app = (
+        Application.builder()
+        .token(token)
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("next", next_command))
@@ -436,8 +450,14 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(callback_check_done))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    # drop_pending_updates=True so only this instance gets updates (avoids conflict if another instance was running)
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+    while True:
+        try:
+            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            break
+        except Conflict:
+            logger.warning("Conflict: only one bot instance must run. Retrying in 30s...")
+            time.sleep(30)
 
 
 if __name__ == "__main__":

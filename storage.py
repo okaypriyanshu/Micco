@@ -201,3 +201,19 @@ def add_to_fresh(cred_lines: list[str]) -> tuple[int, list[str]]:
 def stock_counts() -> tuple[int, int]:
     """Return (fresh_count, used_count)."""
     return len(load_fresh()), len(load_used())
+
+
+# Use PostgreSQL when DATABASE_URL is set (long-term storage)
+if os.getenv("DATABASE_URL"):
+    from db import (
+        add_to_fresh as _db_add_to_fresh,
+        get_by_email as _db_get_by_email,
+        get_next as _db_get_next,
+        init_db as _db_init,
+        stock_counts as _db_stock_counts,
+    )
+    _db_init()
+    get_next = _db_get_next
+    get_by_email = _db_get_by_email
+    add_to_fresh = _db_add_to_fresh
+    stock_counts = _db_stock_counts

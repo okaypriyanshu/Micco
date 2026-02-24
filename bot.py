@@ -1,6 +1,6 @@
 """
-Telegram bot: fresh/used Hotmail credential stock, /next to get one, /check to get OTP.
-Uses file-based storage (data/fresh_stock.txt, data/used.txt) like FrostyBot-style flow.
+Telegram bot: fresh/used Hotmail credential stock, /next (email only), /check OTP, /pass email, /inbox email.
+Storage: PostgreSQL when DATABASE_URL is set, else file-based (data/fresh_stock.txt, data/used.txt).
 """
 import asyncio
 import logging
@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
 
-from graph_client import get_access_token, get_otp_from_inbox
+from graph_client import get_access_token, get_otp_from_inbox, list_inbox_messages
 from storage import (
     get_next,
     add_to_fresh,
@@ -151,9 +151,11 @@ HELP_TEXT = (
     "📋 <b>Micco – Hotmail OTP bot</b>\n\n"
     "• <b>/start</b> – Welcome and short guide\n"
     "• <b>/help</b> – This help\n"
-    "• <b>/next</b> – Get the next unused mail from stock (then use /check for OTP)\n"
+    "• <b>/next</b> – Get the next unused mail from stock (email only; use /pass for password)\n"
     "• <b>/check</b> – Get OTP for your current mail\n"
     "• <b>/check email@hotmail.com</b> – Get OTP for that mail if it’s in stock\n"
+    "• <b>/pass email@hotmail.com</b> – Get password for an email that's in stock\n"
+    "• <b>/inbox email@hotmail.com</b> – See last 10 mails for an email that's in stock\n"
     "• <b>/stock</b> – Show fresh vs used count (admin only)\n"
     "• <b>/upload</b> – Add credentials in bulk (admin only): paste lines or send a .txt file\n\n"
     "Format per line: <code>mail|pass|refresh_token|client_id</code> (optional 5th: client_secret).\n"
@@ -166,8 +168,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "Hi. I manage a <b>stock of Hotmail credentials</b> and check inbox for OTP.\n\n"
-        "• <b>/next</b> – get the next unused mail from stock (assigned to you; use /check for OTP).\n"
-        "• <b>/check</b> – get OTP for your current mail (or /check email@hotmail.com to check that mail if in stock).\n"
+        "• <b>/next</b> – get the next unused mail (email only; /pass email for password).\n"
+        "• <b>/check</b> – get OTP for your current mail (or /check email@... if in stock).\n"
+        "• <b>/pass email@...</b> – get password for an email in stock.\n"
+        "• <b>/inbox email@...</b> – see last 10 mails for an email in stock.\n"
         "• <b>/stock</b> – show fresh vs used count (admin).\n"
         "• <b>/upload</b> – add credentials in bulk (admin): paste lines <code>mail|pass|refresh_token|client_id</code> or send a .txt file.\n\n"
         "Use <b>/help</b> for full help.",
@@ -242,7 +246,7 @@ async def _send_otp_message(
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Assign next credential; send email + password with [Check] [Done] buttons. User's /next message is deleted to keep chat clean."""
+    """Assign next credential; send email only with [Check] [Done] buttons. Use /pass email for password. User's /next message is deleted to keep chat clean."""
     if not await _check_access(update):
         return
     chat_id = update.effective_chat.id
@@ -251,9 +255,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("No fresh stock. Add credentials with /upload (admin).")
         return
     CURRENT[chat_id] = cred
-    pass_str = cred.get("pass") or ""
-    text = f"{cred['mail']}\n{pass_str}" if pass_str else cred["mail"]
-    await update.message.reply_text(text, reply_markup=KEYBOARD_CHECK_DONE)
+    await update.message.reply_text(cred["mail"], reply_markup=KEYBOARD_CHECK_DONE)
     try:
         await update.message.delete()
     except Exception:
@@ -291,6 +293,81 @@ async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pass
     if mid is None:
         await context.bot.send_message(chat_id, "Error", **_thread_kw(thread_id))
+
+
+def _parse_email_arg(text: str) -> str | None:
+    """Extract email from command text (e.g. '/pass user@hotmail.com' -> user@hotmail.com)."""
+    if not text or "@" not in text:
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    email = parts[1].strip()
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        return None
+    return email.lower()
+
+
+async def pass_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Get password for an email that's in stock. Usage: /pass email@hotmail.com"""
+    if not await _check_access(update):
+        return
+    email = _parse_email_arg((update.message and update.message.text) or "")
+    if not email:
+        await update.message.reply_text("Usage: <code>/pass email@hotmail.com</code> (email must be in stock).", parse_mode="HTML")
+        return
+    cred = get_by_email(email)
+    if not cred:
+        await update.message.reply_text(f"<b>{email}</b> not found in stock.", parse_mode="HTML")
+        return
+    pass_str = (cred.get("pass") or "").strip()
+    await update.message.reply_text(f"Password for <b>{email}</b>:\n<code>{pass_str}</code>" if pass_str else f"No password stored for <b>{email}</b>.", parse_mode="HTML")
+
+
+async def inbox_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show last 10 inbox messages for an email that's in stock. Usage: /inbox email@hotmail.com"""
+    if not await _check_access(update):
+        return
+    email = _parse_email_arg((update.message and update.message.text) or "")
+    if not email:
+        await update.message.reply_text("Usage: <code>/inbox email@hotmail.com</code> (email must be in stock).", parse_mode="HTML")
+        return
+    cred = get_by_email(email)
+    if not cred:
+        await update.message.reply_text(f"<b>{email}</b> not found in stock.", parse_mode="HTML")
+        return
+    try:
+        token_data = get_access_token(
+            client_id=cred["client_id"],
+            refresh_token=cred["refresh_token"],
+            client_secret=cred.get("client_secret"),
+        )
+        access_token = token_data.get("access_token")
+        if not access_token:
+            await update.message.reply_text("Could not get access token for this account.")
+            return
+        messages = list_inbox_messages(access_token, top=10)
+    except Exception:
+        await update.message.reply_text("Error fetching inbox. Check token/connection.")
+        return
+    if not messages:
+        await update.message.reply_text(f"Inbox for <b>{email}</b> is empty.", parse_mode="HTML")
+        return
+    def _esc(s: str) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:80]
+
+    lines = [f"📧 <b>Inbox for {email}</b> (last 10):"]
+    for i, msg in enumerate(messages, 1):
+        subj = _esc(msg.get("subject") or "(no subject)")
+        from_info = msg.get("from", {}).get("emailAddress", {})
+        from_addr = _esc(from_info.get("address") or from_info.get("name") or "?")
+        received = (msg.get("receivedDateTime") or "")[:19]
+        preview = _esc((msg.get("bodyPreview") or "").strip().replace("\n", " "))
+        lines.append(f"{i}. <b>{subj}</b>\n   From: {from_addr} | {received}\n   {preview}")
+    text = "\n\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3970] + "\n\n… (truncated)"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,22 +454,19 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="—", reply_markup=InlineKeyboardMarkup([]))
                 except Exception:
                     pass
-        # Get next credential and update this message to new email+pass with [Check] [Done]
-        cred = get_next()
-        if not cred:
-            try:
-                await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([]))
-            except Exception:
-                pass
-            await context.bot.send_message(chat_id, "No fresh stock.", **_thread_kw(getattr(q.message, "message_thread_id", None)))
-            return
-        CURRENT[chat_id] = cred
-        pass_str = cred.get("pass") or ""
-        text = f"{cred['mail']}\n{pass_str}" if pass_str else cred["mail"]
+        # Remove buttons from current credential message (mark it done)
         try:
-            await q.message.edit_text(text, reply_markup=KEYBOARD_CHECK_DONE)
+            await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([]))
         except Exception:
             pass
+        # Send next credential as a new message with [Check] [Done]
+        thread_id = getattr(q.message, "message_thread_id", None)
+        cred = get_next()
+        if not cred:
+            await context.bot.send_message(chat_id, "No fresh stock.", **_thread_kw(thread_id))
+            return
+        CURRENT[chat_id] = cred
+        await context.bot.send_message(chat_id, cred["mail"], reply_markup=KEYBOARD_CHECK_DONE, **_thread_kw(thread_id))
         return
 
 
@@ -518,6 +592,8 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("check", check_inbox))
+    app.add_handler(CommandHandler("pass", pass_command))
+    app.add_handler(CommandHandler("inbox", inbox_command))
     app.add_handler(CommandHandler("stock", stock_command))
     app.add_handler(CommandHandler("upload", upload_command))
     app.add_handler(CallbackQueryHandler(callback_check_done))

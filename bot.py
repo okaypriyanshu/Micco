@@ -293,17 +293,14 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
     if q.data == "done_otp":
         await q.answer()
         msg_ids = LAST_OTP_MESSAGE_IDS.pop(chat_id, [])
-        failed = False
         for msg_id in msg_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
-                failed = True
-        if failed:
-            try:
-                await context.bot.send_message(chat_id, "Could not delete some messages (bot needs delete permission).")
-            except Exception:
-                pass
+                try:
+                    await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="—", reply_markup=InlineKeyboardMarkup([]))
+                except Exception:
+                    pass
         return
     if q.data == "done_otp_self":
         await q.answer()
@@ -311,9 +308,13 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
             await q.message.delete()
         except Exception:
             try:
-                await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).")
+                # Remove OTP text and inline button from the message if delete not allowed
+                await q.message.edit_text("—", reply_markup=InlineKeyboardMarkup([]))
             except Exception:
-                pass
+                try:
+                    await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).")
+                except Exception:
+                    pass
         if chat_id in LAST_OTP_MESSAGE_IDS and q.message and q.message.message_id in LAST_OTP_MESSAGE_IDS[chat_id]:
             LAST_OTP_MESSAGE_IDS[chat_id] = [i for i in LAST_OTP_MESSAGE_IDS[chat_id] if i != q.message.message_id]
         return
@@ -435,7 +436,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(callback_check_done))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # drop_pending_updates=True so only this instance gets updates (avoids conflict if another instance was running)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

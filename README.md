@@ -43,6 +43,8 @@ cp .env.example .env
 python bot.py
 ```
 
+**Important:** Run **only one** instance of the bot per token. If you run it locally and also deploy to a server (e.g. Railway, Render), stop one of them. Otherwise you get `Conflict: terminated by other getUpdates request`. Use the same token in only one place.
+
 ## Usage
 
 - **/start** – Short help.

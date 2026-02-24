@@ -229,7 +229,7 @@ async def _send_otp_message(
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Assign next credential; send email + password with [Check] [Done] buttons. Message is not auto-deleted."""
+    """Assign next credential; send email + password with [Check] [Done] buttons. User's /next message is deleted to keep chat clean."""
     if not await _check_access(update):
         return
     chat_id = update.effective_chat.id
@@ -241,7 +241,10 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     pass_str = cred.get("pass") or ""
     text = f"{cred['mail']}\n{pass_str}" if pass_str else cred["mail"]
     await update.message.reply_text(text, reply_markup=KEYBOARD_CHECK_DONE)
-    await _try_delete_user_message(update)
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
 
 async def check_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,6 +322,11 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="—", reply_markup=InlineKeyboardMarkup([]))
                 except Exception:
                     pass
+        # Remove Check and Done buttons from this credential message so it stays clean
+        try:
+            await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+        except Exception:
+            pass
         return
     if q.data == "done_otp_self":
         await q.answer()

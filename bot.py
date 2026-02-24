@@ -181,11 +181,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
 
 
-# Inline buttons below email+password
+# Credential message: before OTP
 KEYBOARD_CHECK_DONE = InlineKeyboardMarkup([
     [InlineKeyboardButton("Check", callback_data="check_otp"), InlineKeyboardButton("Done", callback_data="done_otp")],
 ])
-KEYBOARD_DONE = InlineKeyboardMarkup([[InlineKeyboardButton("Done", callback_data="done_otp_self")]])
+# Credential message: after OTP is shown (below OTP there is Refresh)
+KEYBOARD_DONE_DONE_NEXT = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Done", callback_data="done_otp"), InlineKeyboardButton("Done & Next", callback_data="done_and_next")],
+])
+# OTP message: Refresh updates same message with new OTP (no new message)
+KEYBOARD_REFRESH = InlineKeyboardMarkup([[InlineKeyboardButton("Refresh", callback_data="refresh_otp")]])
 
 
 def _thread_kw(message_thread_id: int | None) -> dict:
@@ -195,16 +200,8 @@ def _thread_kw(message_thread_id: int | None) -> dict:
     return {"message_thread_id": message_thread_id}
 
 
-async def _send_otp_message(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    cred: dict,
-    message_thread_id: int | None = None,
-) -> int | None:
-    """Fetch OTP for cred, send one message with code(s) and [Done] button in the same thread. Appends message_id to LAST_OTP_MESSAGE_IDS. Returns message_id or None."""
-    if chat_id not in LAST_OTP_MESSAGE_IDS:
-        LAST_OTP_MESSAGE_IDS[chat_id] = []
-    kw = _thread_kw(message_thread_id)
+def _fetch_otp_text(cred: dict) -> str | None:
+    """Fetch OTP for cred; returns text (codes or 'No OTP') or None on error."""
     try:
         token_data = get_access_token(
             client_id=cred["client_id"],
@@ -216,12 +213,28 @@ async def _send_otp_message(
             return None
         otp_entries = get_otp_from_inbox(access_token, max_messages=15)
         if not otp_entries:
-            msg = await context.bot.send_message(chat_id, "No OTP", reply_markup=KEYBOARD_DONE, **kw)
-            LAST_OTP_MESSAGE_IDS[chat_id].append(msg.message_id)
-            return msg.message_id
+            return "No OTP"
         codes_only = [", ".join(e["otp_codes"]) for e in otp_entries]
-        text = "<code>" + "  |  ".join(codes_only) + "</code>"
-        msg = await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=KEYBOARD_DONE, **kw)
+        return "<code>" + "  |  ".join(codes_only) + "</code>"
+    except Exception:
+        return None
+
+
+async def _send_otp_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    cred: dict,
+    message_thread_id: int | None = None,
+) -> int | None:
+    """Fetch OTP for cred, send one message with code(s) and [Refresh] button in the same thread. Appends message_id to LAST_OTP_MESSAGE_IDS. Returns message_id or None."""
+    if chat_id not in LAST_OTP_MESSAGE_IDS:
+        LAST_OTP_MESSAGE_IDS[chat_id] = []
+    kw = _thread_kw(message_thread_id)
+    text = _fetch_otp_text(cred)
+    if text is None:
+        return None
+    try:
+        msg = await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=KEYBOARD_REFRESH, **kw)
         LAST_OTP_MESSAGE_IDS[chat_id].append(msg.message_id)
         return msg.message_id
     except Exception:
@@ -310,6 +323,30 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
         mid = await _send_otp_message(context, chat_id, cred, message_thread_id=thread_id)
         if mid is None:
             await context.bot.send_message(chat_id, "Error fetching OTP. Check token / connection.", **_thread_kw(thread_id))
+            return
+        # As soon as OTP is sent, change credential buttons to Done, Done & Next
+        try:
+            await q.message.edit_reply_markup(reply_markup=KEYBOARD_DONE_DONE_NEXT)
+        except Exception:
+            pass
+        return
+    if q.data == "refresh_otp":
+        cred = CURRENT.get(chat_id)
+        if not cred:
+            await q.answer("No mail assigned.", show_alert=True)
+            return
+        await q.answer("Refreshing…")
+        text = _fetch_otp_text(cred)
+        if text is None:
+            try:
+                await q.message.edit_text("Error refreshing OTP.", reply_markup=KEYBOARD_REFRESH)
+            except Exception:
+                pass
+            return
+        try:
+            await q.message.edit_text(text, parse_mode="HTML", reply_markup=KEYBOARD_REFRESH)
+        except Exception:
+            pass
         return
     if q.data == "done_otp":
         await q.answer()
@@ -322,28 +359,40 @@ async def callback_check_done(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="—", reply_markup=InlineKeyboardMarkup([]))
                 except Exception:
                     pass
-        # Remove Check and Done buttons from this credential message so it stays clean
+        # Remove buttons from credential message
         try:
             await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([]))
         except Exception:
             pass
         return
-    if q.data == "done_otp_self":
+    if q.data == "done_and_next":
         await q.answer()
-        try:
-            await q.message.delete()
-        except Exception:
+        # Remove OTP message(s)
+        msg_ids = LAST_OTP_MESSAGE_IDS.pop(chat_id, [])
+        for msg_id in msg_ids:
             try:
-                # Remove OTP text and inline button from the message if delete not allowed
-                await q.message.edit_text("—", reply_markup=InlineKeyboardMarkup([]))
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
                 try:
-                    thread_id = getattr(q.message, "message_thread_id", None)
-                    await context.bot.send_message(chat_id, "Could not remove (bot needs delete permission).", **_thread_kw(thread_id))
+                    await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text="—", reply_markup=InlineKeyboardMarkup([]))
                 except Exception:
                     pass
-        if chat_id in LAST_OTP_MESSAGE_IDS and q.message and q.message.message_id in LAST_OTP_MESSAGE_IDS[chat_id]:
-            LAST_OTP_MESSAGE_IDS[chat_id] = [i for i in LAST_OTP_MESSAGE_IDS[chat_id] if i != q.message.message_id]
+        # Get next credential and update this message to new email+pass with [Check] [Done]
+        cred = get_next()
+        if not cred:
+            try:
+                await q.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id, "No fresh stock.", **_thread_kw(getattr(q.message, "message_thread_id", None)))
+            return
+        CURRENT[chat_id] = cred
+        pass_str = cred.get("pass") or ""
+        text = f"{cred['mail']}\n{pass_str}" if pass_str else cred["mail"]
+        try:
+            await q.message.edit_text(text, reply_markup=KEYBOARD_CHECK_DONE)
+        except Exception:
+            pass
         return
 
 

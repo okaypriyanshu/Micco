@@ -53,6 +53,53 @@ python bot.py
 
 **Auto-detect by email:** Send a message that is only an email address (e.g. `user@hotmail.com`). If that mail is in fresh or used stock, the bot sets it as your current mail and tells you to use **/check**.
 
+---
+
+## Admin: how to feed emails
+
+Only users in **ADMIN_IDS** can do this (in DM or in the allowed group).
+
+1. **Open DM with the bot** (or use the bot in your allowed group).
+2. Send **/upload**. The bot will ask for credentials.
+3. **Option A – Paste in chat**  
+   Paste multiple lines, one credential per line:
+   ```text
+   user1@hotmail.com|password1|refresh_token_1|client_id
+   user2@hotmail.com|password2|refresh_token_2|client_id
+   ```
+   The bot will reply with how many were added to **fresh stock**.
+4. **Option B – Send a file**  
+   Send a **.txt** file where each line is one credential in the same format. The bot will add them to fresh stock and report the count.
+
+Each line format: **mail|pass|refresh_token|client_id** (optional 5th: **client_secret**).  
+Use **/stock** anytime to see **Fresh** vs **Used** counts.
+
+---
+
+## Users: how to access and get OTP
+
+Only in the **allowed group(s)** and (if set) only for users in **ALLOWED_USER_IDS**. Users cannot feed data; only admins can **/upload**.
+
+1. **Get credentials from stock**  
+   Send **/next**. The bot assigns you one unused mail from stock and moves it to “used”. You get the **email + password** so you can use the account; then use **/check** for OTP.
+
+2. **Get the OTP**  
+   When you expect a verification email (e.g. Zoom code, sign-up code):
+   - Send **/check**.  
+   The bot checks the inbox of the mail currently assigned to that chat and replies with any OTP found (e.g. *OTP received for user@hotmail.com: 469421*).
+
+3. **Check a specific mail**  
+   If you already know the address (e.g. from a previous /next):
+   - Send **/check user@hotmail.com**  
+   or send a single message with just the email: **user@hotmail.com**  
+   Then send **/check**. The bot will use that mail (if it’s in stock) and return the OTP.
+
+**Summary:** **/next** → get email + password for one account; **/check** → get OTP for that mail (or **/check email@...** for a specific mail in stock).
+
+**Clean chat:** If **CLEAN_CHAT** is enabled (default), the bot deletes your command message and deletes its own reply (credentials or OTP) after **DELETE_AFTER_SECONDS** (default 90), so the chat stays clean. Set `CLEAN_CHAT=false` in `.env` to disable.
+
+---
+
 ## Data files (file-based storage)
 
 - **`data/fresh_stock.txt`** – One credential per line (unused). Populated by **/upload**.

@@ -351,9 +351,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 return
 
-    # Multiple lines (bulk) – only for admin
-    if is_admin and "\n" in text:
+    # Bulk credentials – admin only. Treat as bulk if newlines OR one long line that looks like credentials (e.g. pasted with spaces instead of newlines)
+    if is_admin and text and ("\n" in text or (text.count("|") >= 3 and "@" in text)):
         line_list = [L.strip() for L in text.splitlines() if L.strip()]
+        if not line_list:
+            line_list = [text.strip()]
         added, errors = add_to_fresh(line_list)
         msg = f"Added <b>{added}</b> to fresh stock."
         if errors:
